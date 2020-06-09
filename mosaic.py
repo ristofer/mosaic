@@ -2,16 +2,18 @@ import sys
 import os
 from PIL import Image
 from multiprocessing import Process, Queue, cpu_count
-
+import copy
+Image.MAX_IMAGE_PIXELS = None
 # Change these 3 config parameters to suit your needs...
-TILE_SIZE      = 50		# height/width of mosaic tiles in pixels
-TILE_MATCH_RES = 5		# tile matching resolution (higher values give better fit but require more processing)
-ENLARGEMENT    = 8		# the mosaic image will be this many times wider and taller than the original
+TILE_SIZE      = 100		# height/width of mosaic tiles in pixels
+TILE_MATCH_RES = 1		# tile matching resolution (higher values give better fit but require more processing)
+ENLARGEMENT    = 24		# the mosaic image will be this many times wider and taller than the original
 
 TILE_BLOCK_SIZE = TILE_SIZE / max(min(TILE_MATCH_RES, TILE_SIZE), 1)
 WORKER_COUNT = max(cpu_count() - 1, 1)
 OUT_FILE = 'mosaic.jpeg'
 EOQ_VALUE = None
+COUNTER = 0
 
 class TileProcessor:
 	def __init__(self, tiles_directory):
@@ -83,7 +85,11 @@ class TargetImage:
 
 class TileFitter:
 	def __init__(self, tiles_data):
-		self.tiles_data = tiles_data
+		self.tiles_data = copy.copy(tiles_data)
+		self.tiles_bkp = copy.copy(tiles_data)
+		self.used_tiles = [0]*len(self.tiles_bkp)
+		self.all_images_in = False
+		self.stepsito = 0
 
 	def __get_tile_diff(self, t1, t2, bail_out_value):
 		diff = 0
@@ -99,15 +105,23 @@ class TileFitter:
 		best_fit_tile_index = None
 		min_diff = sys.maxsize
 		tile_index = 0
-
+		if len(self.tiles_bkp) == 0:
+			self.tiles_bkp = copy.copy(self.tiles_data)
+		a = sum(self.used_tiles)
+		if a == len(self.used_tiles):
+			self.used_tiles = [0] * len(self.tiles_data)
+			self.all_images_in = True
+#AKAAAAAAA ESTA LA WEA
+#QUE CAMIBE EN EL IF USED TILES 
 		# go through each tile in turn looking for the best match for the part of the image represented by 'img_data'
-		for tile_data in self.tiles_data:
+		for tile_data in self.tiles_bkp:
 			diff = self.__get_tile_diff(img_data, tile_data, min_diff)
-			if diff < min_diff:
+			if diff < min_diff and (self.used_tiles[tile_index] == 0 or self.stepsito % 500 != 0):
 				min_diff = diff
 				best_fit_tile_index = tile_index
 			tile_index += 1
-
+		self.used_tiles[best_fit_tile_index] = 1	
+		self.stepsito += 1
 		return best_fit_tile_index
 
 def fit_tiles(work_queue, result_queue, tiles_data):
@@ -121,6 +135,8 @@ def fit_tiles(work_queue, result_queue, tiles_data):
 				break
 			tile_index = tile_fitter.get_best_fit_tile(img_data)
 			result_queue.put((img_coords, tile_index))
+			###
+			#tile_fitter.tiles_data.pop(tile_index)
 		except KeyboardInterrupt:
 			pass
 
@@ -137,22 +153,23 @@ class ProgressCounter:
 		print("Progress: {:04.1f}%".format(100 * self.counter / self.total), flush=True, end='\r')
 
 class MosaicImage:
-	def __init__(self, original_img):
+	def __init__(self, original_img,outpath):
 		self.image = Image.new(original_img.mode, original_img.size)
 		self.x_tile_count = int(original_img.size[0] / TILE_SIZE)
 		self.y_tile_count = int(original_img.size[1] / TILE_SIZE)
 		self.total_tiles  = self.x_tile_count * self.y_tile_count
-
+		self.pathito = outpath
 	def add_tile(self, tile_data, coords):
 		img = Image.new('RGB', (TILE_SIZE, TILE_SIZE))
 		img.putdata(tile_data)
 		self.image.paste(img, coords)
 
 	def save(self, path):
+		print(path)
 		self.image.save(path)
 
-def build_mosaic(result_queue, all_tile_data_large, original_img_large):
-	mosaic = MosaicImage(original_img_large)
+def build_mosaic(result_queue, all_tile_data_large, original_img_large,outpath):
+	mosaic = MosaicImage(original_img_large,outpath)
 
 	active_workers = WORKER_COUNT
 	while True:
@@ -170,15 +187,16 @@ def build_mosaic(result_queue, all_tile_data_large, original_img_large):
 		except KeyboardInterrupt:
 			pass
 
-	mosaic.save(OUT_FILE)
+	mosaic.save(mosaic.pathito)
 	print('\nFinished, output is in', OUT_FILE)
 
-def compose(original_img, tiles):
+def compose(original_img, tiles,outpath):
 	print('Building mosaic, press Ctrl-C to abort...')
 	original_img_large, original_img_small = original_img
 	tiles_large, tiles_small = tiles
 
-	mosaic = MosaicImage(original_img_large)
+	mosaic = MosaicImage(original_img_large,outpath)
+	#mosaic.pathito = outpath
 
 	all_tile_data_large = [list(tile.getdata()) for tile in tiles_large]
 	all_tile_data_small = [list(tile.getdata()) for tile in tiles_small]
@@ -188,7 +206,7 @@ def compose(original_img, tiles):
 
 	try:
 		# start the worker processes that will build the mosaic image
-		Process(target=build_mosaic, args=(result_queue, all_tile_data_large, original_img_large)).start()
+		Process(target=build_mosaic, args=(result_queue, all_tile_data_large, original_img_large,outpath)).start()
 
 		# start the worker processes that will perform the tile fitting
 		for n in range(WORKER_COUNT):
@@ -210,14 +228,28 @@ def compose(original_img, tiles):
 		for n in range(WORKER_COUNT):
 			work_queue.put((EOQ_VALUE, EOQ_VALUE))
 
-def mosaic(img_path, tiles_path):
+def mosaic(img_path, tiles_path,outpath):
 	image_data = TargetImage(img_path).get_data()
 	tiles_data = TileProcessor(tiles_path).get_tiles()
-	compose(image_data, tiles_data)
+	compose(image_data, tiles_data,outpath)
+#import os, sys
 
+#path = "/home/tof/hash/fundacionmustakis/"
+#dirs = os.listdir( path )
+
+#def resize():
+#	COUNTER = 0
+#	for item in dirs:
+#		print(item.split(".")[-1])
+#		if os.path.isfile(path+item) and item.split(".")[-1] == "jpg":
+#			out = "mosaic" + str(COUNTER) + ".jpeg"
+#			mosaic(path+item,"/home/tof/hash/fundacionmustakis/new/",out)
+#			COUNTER += 1
+#			if COUNTER == 200:
+#				break
 if __name__ == '__main__':
-	if len(sys.argv) < 3:
+	if len(sys.argv) < 4:
 		print('Usage: {} <image> <tiles directory>\r'.format(sys.argv[0]))
 	else:
-		mosaic(sys.argv[1], sys.argv[2])
+		mosaic(sys.argv[1], sys.argv[2],"mosaic{}.jpeg".format(sys.argv[3]))
 
